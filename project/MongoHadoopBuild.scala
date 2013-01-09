@@ -19,14 +19,14 @@ object MongoHadoopBuild extends Build {
   val loadSampleData = TaskKey[Unit]("load-sample-data", "Loads sample data for example programs")
 
 
-  private val stockPig = "0.9.2"
+  private val stockPig = "0.10.0"
   private val cdh3Rel = "cdh3u3"
   private val cdh3Hadoop = "0.20.2-%s".format(cdh3Rel) // current "base" version they patch against
   private val cdh3Pig = "0.8.1-%s".format(cdh3Rel)
-  private val cdh4Rel = "cdh4b1"
-  private val cdh4YarnHadoop = "0.23.0-%s".format(cdh4Rel) // current "base" version they patch against
-  private val cdh4CoreHadoop = "0.23.0-mr1-%s".format(cdh4Rel)
-  private val cdh4Pig = "0.9.2-%s".format(cdh4Rel)
+  private val cdh4Rel = "cdh4.1.2"
+  private val cdh4YarnHadoop = "2.0.0-%s".format(cdh4Rel) // current "base" version they patch against
+  private val cdh4CoreHadoop = "2.0.0-%s".format(cdh4Rel)
+  private val cdh4Pig = "0.10.0-%s".format(cdh4Rel)
 
   private val coreHadoopMap = Map("0.20" -> hadoopDependencies("0.20.205.0", false, stockPig),
                                   "0.20.x" -> hadoopDependencies("0.20.205.0", false, stockPig),
@@ -264,6 +264,9 @@ object MongoHadoopBuild extends Build {
         if (hadoopVersion.startsWith("0.22")) {
             deps ++ Seq("org.apache.hadoop" % "hadoop-mapred" % altStreamingVer.getOrElse(hadoopVersion))
         } else if (hadoopVersion.startsWith("0.23")) {
+          deps ++ Seq(mrDep("core"), mrDep("common"), mrDep("shuffle"),
+                      mrDep("shuffle"), mrDep("app"), mrDep("jobclient"))
+        } else if (hadoopVersion.startsWith("2.0.0")) {
           deps ++ Seq(mrDep("core"), mrDep("common"), mrDep("shuffle"),
                       mrDep("shuffle"), mrDep("app"), mrDep("jobclient"))
         } else {

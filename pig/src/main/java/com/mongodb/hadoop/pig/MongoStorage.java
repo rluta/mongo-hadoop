@@ -41,6 +41,7 @@ public class MongoStorage extends StoreFunc implements StoreMetadata {
     static final String PIG_OUTPUT_SCHEMA_UDF_CONTEXT = "mongo.pig.output.schema.udf_context";
     protected ResourceSchema schema = null;
     private final MongoStorageOptions options;
+    private java.text.DateFormat dt = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'Z");
 
     public MongoStorage(){ 
         this.options = null;
@@ -98,53 +99,110 @@ public class MongoStorage extends StoreFunc implements StoreMetadata {
                             ResourceSchema.ResourceFieldSchema field,
                             Object d) throws IOException {
 
-        // If the field is missing or the value is null, write a null
-        if (d == null) {
+		String fname = field.getName();
+		
+        // If the field is missing or the value is null, write a null unless 
+        if ((d == null)&&(this.options.shouldDropNull() == false)) {
             builder.add( field.getName(), d );
             return;
         }
 
-        ResourceSchema s = field.getSchema();
+		// field name is the requested id key, rename the fields to internal Mongo id field
+		if (fname.equals(this.options.getIdKey()))
+		{
+			fname = "_id";
+		}
+
+		// if field name has the operation prefix, replace prefix with $ sign. 
+		if ((this.options.getOpPrefix() != null) && (fname.startsWith(this.options.getOpPrefix())))
+		{
+			fname = "$"+fname.substring(this.options.getOpPrefix().length());
+		}
+		
+       	ResourceSchema s = field.getSchema();
+		java.text.DateFormat dt = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'Z");
 
         // Based on the field's type, write it out
         switch (field.getType()) {
             case DataType.INTEGER:
-                builder.add( field.getName(), (Integer)d );
+                builder.add( fname, (Integer)d );
                 return;
 
             case DataType.LONG:
-                builder.add( field.getName(), (Long)d );
+                builder.add( fname, (Long)d );
                 return;
 
             case DataType.FLOAT:
-                builder.add( field.getName(), (Float)d );
+                builder.add( fname, (Float)d );
                 return;
 
             case DataType.DOUBLE:
-                builder.add( field.getName(), (Double)d );
+                builder.add( fname, (Double)d );
                 return;
 
             case DataType.BYTEARRAY:
-                builder.add( field.getName(), d.toString() );
+                builder.add( fname, d.toString() );
                 return;
 
             case DataType.CHARARRAY:
-                builder.add( field.getName(), (String)d );
+				String sd = (String)d;
+				if(sd.matches("^[0-9-]+T[0-9:.]+Z$")) {
+					sd=sd+"+0000";
+					try { 
+						builder.add( fname, dt.parse(sd)); 
+					} catch (Exception e) {}
+	            }
+				else
+				{
+	                builder.add( fname, (String)d );
+				}
+
                 return;
+
+			case DataType.MAP:
+			case DataType.INTERNALMAP: 
+				Map<Object, Object> mm = (Map<Object, Object>)d;
+				Iterator<Map.Entry<Object, Object> > i = mm.entrySet().iterator();
+
+				HashMap h = new HashMap();
+				while (i.hasNext()) {
+					Map.Entry<Object, Object> entry = i.next();
+				    Object v = entry.getValue();
+					Object res = null;
+					// try to cast as int
+				    try { res = Integer.parseInt((String)v); } catch (Exception e) {}
+					// try to cast as long
+					if (res == null) try { res = Long.parseLong((String)v); } catch (Exception e) {}
+					// try as a List
+					// try to cast as string (or date if matches date format)
+					if (res == null) try { 
+						res = (String)v; 
+						// check if matches date format, if so convert to date
+						if(((String)res).matches("^[0-9-]+T[0-9:.]+Z$")) {
+							res=res+"+0000";
+							res = dt.parse((String)res); 
+			            }						
+					} catch (Exception e) {}
+					
+				    h.put(entry.getKey(),res);
+				}
+                builder.add( fname, (Map)h );
+				break;
 
             // Given a TUPLE, create a Map so BSONEncoder will eat it
             case DataType.TUPLE:
                 if (s == null) {
                     throw new IOException("Schemas must be fully specified to use "
                             + "this storage function.  No schema found for field " +
-                            field.getName());
+                            fname);
                 }
                 ResourceSchema.ResourceFieldSchema[] fs = s.getFields();
-                LinkedHashMap m = new java.util.LinkedHashMap();
-                for (int j = 0; j < fs.length; j++) {
-                    m.put(fs[j].getName(), ((Tuple) d).get(j));
-                }
-                builder.add( field.getName(), (Map)m );
+				builder = builder.push(fname);
+		        for (int j = 0; j < fs.length; j++) {
+				    Object obj = ((Tuple)d).get(j);
+				    writeField(builder,fs[j],obj);
+				}
+				builder = builder.pop();
                 return;
 
             // Given a BAG, create an Array so BSONEnconder will eat it.
@@ -152,7 +210,7 @@ public class MongoStorage extends StoreFunc implements StoreMetadata {
                 if (s == null) {
                     throw new IOException("Schemas must be fully specified to use "
                             + "this storage function.  No schema found for field " +
-                            field.getName());
+                            fname);
                 }
                 fs = s.getFields();
                 if (fs.length != 1 || fs[0].getType() != DataType.TUPLE) {
@@ -164,20 +222,20 @@ public class MongoStorage extends StoreFunc implements StoreMetadata {
                 if (s == null) {
                     throw new IOException("Schemas must be fully specified to use "
                             + "this storage function.  No schema found for field " +
-                            field.getName());
+                            fname);
                 }
                 fs = s.getFields();
 
                 ArrayList a = new ArrayList<Map>();
                 for (Tuple t : (DataBag)d) {
-                    LinkedHashMap ma = new java.util.LinkedHashMap();
-                    for (int j = 0; j < fs.length; j++) {
-                        ma.put(fs[j].getName(), ((Tuple) t).get(j));
-                    }
-                    a.add(ma);
+				    BasicDBObjectBuilder build = BasicDBObjectBuilder.start();
+		            for (int j = 0; j < fs.length; j++) {
+						writeField(build,fs[j], ((Tuple) t).get(j));
+		            }
+		            a.add(build.get());
                 }
 
-                builder.add( field.getName(), a);
+                builder.add( fname, a);
                 return;
         }
     }
@@ -243,6 +301,19 @@ public class MongoStorage extends StoreFunc implements StoreMetadata {
         _udfContextSignature = signature;
     }
 
+	protected Date parseDate(String dateString) throws Exception
+	{
+		// FIXME: for now, hardcode ISO8601 with UTC format but introducing a JODA time dependency
+		// would give more flexibility
+		if(dateString.matches("^[0-9-]+T[0-9:.]+Z$")) {
+			dateString+="+0000";
+			try { 
+			 return dt.parse(dateString); 
+			} catch (Exception e) {}
+        }
+
+		return null;
+	}
     String _udfContextSignature = null;
     MongoRecordWriter _recordWriter = null;
 }
