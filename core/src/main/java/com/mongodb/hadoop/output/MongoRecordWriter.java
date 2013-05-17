@@ -19,62 +19,116 @@ package com.mongodb.hadoop.output;
 import com.mongodb.*;
 import com.mongodb.hadoop.*;
 import com.mongodb.hadoop.io.BSONWritable;
-import org.apache.hadoop.io.*;
+import com.mongodb.hadoop.io.MongoUpdateWritable;
 import org.apache.hadoop.mapreduce.*;
 import org.bson.*;
 
 import java.io.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+import org.apache.commons.logging.*;
+
 
 public class MongoRecordWriter<K, V> extends RecordWriter<K, V> {
-    
+
+    private static final Log log = LogFactory.getLog( MongoRecordWriter.class );
     private final String[] updateKeys;
     private final boolean multiUpdate;
+    private int roundRobinCounter = 0;
 
     public MongoRecordWriter( DBCollection c, TaskAttemptContext ctx ){
         this(c, ctx, null);
     }
-    
+
     public MongoRecordWriter( DBCollection c, TaskAttemptContext ctx, String[] updateKeys) {
         this(c, ctx, updateKeys, false);
     }
-    
+
     public MongoRecordWriter( DBCollection c, TaskAttemptContext ctx, String[] updateKeys, boolean multi) {
-        _collection = c;
+        this(Arrays.asList(c), ctx, updateKeys, multi);
+    }
+
+    public MongoRecordWriter( List<DBCollection> c, TaskAttemptContext ctx ){
+        this(c, ctx, null);
+    }
+
+    public MongoRecordWriter( List<DBCollection> c, TaskAttemptContext ctx, String[] updateKeys) {
+        this(c, ctx, updateKeys, false);
+    }
+
+    public MongoRecordWriter( List<DBCollection> c, TaskAttemptContext ctx, String[] updateKeys, boolean multi) {
+        _collections = new ArrayList<DBCollection>(c);
         _context = ctx;
         this.updateKeys = updateKeys;
         this.multiUpdate = false;
+        this.numberOfHosts = c.size();
+
+        //authenticate if necessary - but don't auth twice on same DB
+        MongoConfig config = new MongoConfig(ctx.getConfiguration());
+        if(config.getAuthURI() != null){
+            MongoURI authURI = config.getAuthURI();
+            if(authURI.getUsername() != null &&
+                authURI.getPassword() != null ){
+                // need to verify that it is not already one of the collections we are writing to.
+                DBCollection _collection = _collections.get(0);
+                DB targetAuthDB = _collection.getDB().getSisterDB(authURI.getDatabase());
+                if(!(targetAuthDB.getName().equals(_collection.getDB().getName()))){
+                    targetAuthDB.authenticate(authURI.getUsername(), authURI.getPassword());
+                }
+            }
+        }
     }
 
     public void close( TaskAttemptContext context ){
-        _collection.getDB().getLastError();
+        for (DBCollection collection : _collections) {
+            collection.getDB().getLastError();
+        }
     }
 
     public void write( K key, V value ) throws IOException{
         final DBObject o = new BasicDBObject();
 
-        if ( key instanceof MongoOutput ){
-            ( (MongoOutput) key ).appendAsKey( o );
+        if( value instanceof MongoUpdateWritable ){
+            //ignore the key - just use the update directly.
+            MongoUpdateWritable muw = (MongoUpdateWritable)value;
+            try{
+                DBCollection dbCollection = getDbCollectionByRoundRobin();
+                dbCollection.update(new BasicDBObject(muw.getQuery()),
+                                    new BasicDBObject(muw.getModifiers()),
+                                    muw.isUpsert(),
+                                    muw.isMultiUpdate());
+                return;
+            } catch ( final MongoException e ) {
+                e.printStackTrace();
+                throw new IOException( "can't write to mongo", e );
+            }
         }
-        else if ( key instanceof BSONObject ){
+
+        if ( key instanceof BSONWritable ){
+            o.put("_id", ((BSONWritable)key).getDoc());
+        } else if ( key instanceof BSONObject ){
             o.put( "_id", key );
-        }
-        else{
+        } else {
             o.put( "_id", BSONWritable.toBSON(key) );
         }
 
-        if ( value instanceof MongoOutput ){
+        if (value instanceof BSONWritable ){
+            o.putAll( ((BSONWritable)value).getDoc() );
+        } else if ( value instanceof MongoOutput ){
             ( (MongoOutput) value ).appendAsValue( o );
-        }
-        else if ( value instanceof BSONObject ){
+        } else if ( value instanceof BSONObject ){
             o.putAll( (BSONObject) value );
-        }
-        else{
+        } else{
             o.put( "value", BSONWritable.toBSON( value ) );
         }
 
         try {
+            DBCollection dbCollection = getDbCollectionByRoundRobin();
+
             if (updateKeys == null) {
-                _collection.save( o );
+                dbCollection.save(o);
             } else {
                 // Form the query fields
                 DBObject query = new BasicDBObject(updateKeys.length);
@@ -87,23 +141,32 @@ public class MongoRecordWriter<K, V> extends RecordWriter<K, V> {
                     o.removeField("_id");
                 }
                 DBObject set = new BasicDBObject().append("$set", o);
-                _collection.update(query, set, true, multiUpdate);
+                dbCollection.update(query, set, true, multiUpdate);
             }
         }
         catch ( final MongoException e ) {
+            e.printStackTrace();
             throw new IOException( "can't write to mongo", e );
         }
     }
-    
+
+    private synchronized DBCollection getDbCollectionByRoundRobin() {
+        int hostIndex = (roundRobinCounter++ & 0x7FFFFFFF) % numberOfHosts;
+        return _collections.get(hostIndex);
+    }
+
     public void ensureIndex(DBObject index, DBObject options) {
-        _collection.ensureIndex(index, options);
+        // just do it on one mongodS
+        DBCollection dbCollection = _collections.get(0);
+        dbCollection.ensureIndex(index, options);
     }
 
     public TaskAttemptContext getContext(){
         return _context;
     }
 
-    final DBCollection _collection;
+    final List<DBCollection> _collections;
+    final int numberOfHosts;
     final TaskAttemptContext _context;
 }
 

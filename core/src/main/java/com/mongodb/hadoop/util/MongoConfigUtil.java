@@ -19,10 +19,13 @@ package com.mongodb.hadoop.util;
 
 import com.mongodb.*;
 import com.mongodb.util.*;
+import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.*;
 import org.apache.hadoop.conf.*;
 import org.apache.hadoop.io.*;
 import org.apache.hadoop.mapreduce.*;
+
+import java.util.*;
 
 /**
  * Configuration helper tool for MongoDB related Map/Reduce jobs
@@ -58,6 +61,7 @@ public class MongoConfigUtil {
     public static final String INPUT_URI = "mongo.input.uri";
     public static final String OUTPUT_URI = "mongo.output.uri";
 
+
     /**
      * The MongoDB field to read from for the Mapper Input.
      *
@@ -72,6 +76,16 @@ public class MongoConfigUtil {
     public static final String INPUT_SORT = "mongo.input.sort";
     public static final String INPUT_LIMIT = "mongo.input.limit";
     public static final String INPUT_SKIP = "mongo.input.skip";
+
+    /**
+     * A username and password to use.
+     *
+     * This is necessary when running jobs with a sharded cluster, as 
+     * access to the config database is needed to get 
+     *
+     */
+    public static final String AUTH_URI = "mongo.auth.uri";
+
 
     /**
      * When *not* using 'read_from_shards' or 'read_shard_chunks'
@@ -131,6 +145,13 @@ public class MongoConfigUtil {
      * Defaults to {@code false}
      */
     public static final String SPLITS_SLAVE_OK = "mongo.input.split.allow_read_from_secondaries";
+
+    /**
+     * If true then queries for splits will be constructed using $lt/$gt instead of $min and $max.
+     *
+     * Defaults to {@code false}
+     */
+    public static final String SPLITS_USE_RANGEQUERY = "mongo.input.split.use_range_queries";
 
     public static boolean isJobVerbose( Configuration conf ){
         return conf.getBoolean( JOB_VERBOSE, false );
@@ -242,6 +263,20 @@ public class MongoConfigUtil {
         conf.setClass( JOB_INPUT_FORMAT, val, InputFormat.class );
     }
 
+    public static List<MongoURI> getMongoURIs( Configuration conf, String key ){
+        final String raw = conf.get( key );
+        if (raw != null && !raw.trim().isEmpty() ) {
+            List<MongoURI> result = new LinkedList<MongoURI>();
+            String[] split = StringUtils.split(raw);
+            for (String mongoURI : split) {
+                result.add(new MongoURI(mongoURI));
+            }
+            return result;
+        }
+        else
+            return Collections.emptyList();
+    }
+
     public static MongoURI getMongoURI( Configuration conf, String key ){
         final String raw = conf.get( key );
         if ( raw != null && !raw.trim().isEmpty() )
@@ -252,6 +287,18 @@ public class MongoConfigUtil {
 
     public static MongoURI getInputURI( Configuration conf ){
         return getMongoURI( conf, INPUT_URI );
+    }
+
+    public static MongoURI getAuthURI( Configuration conf ){
+        return getMongoURI( conf, AUTH_URI );
+    }
+
+    public static List<DBCollection> getCollections( List<MongoURI> uris ){
+        List<DBCollection> dbCollections = new LinkedList<DBCollection>();
+        for (MongoURI uri : uris) {
+            dbCollections.add(getCollection(uri));
+        }
+        return dbCollections;
     }
 
     public static DBCollection getCollection( MongoURI uri ){
@@ -278,8 +325,18 @@ public class MongoConfigUtil {
 
     public static DBCollection getOutputCollection( Configuration conf ){
         try {
-            final MongoURI _uri = getOutputURI( conf );
-            return getCollection( _uri );
+            final MongoURI _uri = getOutputURI(conf);
+            return getCollection(_uri);
+        }
+        catch ( final Exception e ) {
+            throw new IllegalArgumentException( "Unable to connect to MongoDB Output Collection.", e );
+        }
+    }
+
+    public static List<DBCollection> getOutputCollections( Configuration conf ){
+        try {
+            final List<MongoURI> _uris = getOutputURIs(conf);
+            return getCollections(_uris);
         }
         catch ( final Exception e ) {
             throw new IllegalArgumentException( "Unable to connect to MongoDB Output Collection.", e );
@@ -288,7 +345,7 @@ public class MongoConfigUtil {
 
     public static DBCollection getInputCollection( Configuration conf ){
         try {
-            final MongoURI _uri = getInputURI( conf );
+            final MongoURI _uri = getInputURI(conf);
             return getCollection( _uri );
         }
         catch ( final Exception e ) {
@@ -313,12 +370,20 @@ public class MongoConfigUtil {
         }
     }
 
+    public static void setAuthURI( Configuration conf, String uri ){
+        setMongoURIString( conf, AUTH_URI, uri );
+    }
+
     public static void setInputURI( Configuration conf, String uri ){
         setMongoURIString( conf, INPUT_URI, uri );
     }
 
     public static void setInputURI( Configuration conf, MongoURI uri ){
-        setMongoURI( conf, INPUT_URI, uri );
+        setMongoURI(conf, INPUT_URI, uri);
+    }
+
+    public static List<MongoURI> getOutputURIs( Configuration conf ){
+        return getMongoURIs(conf, OUTPUT_URI);
     }
 
     public static MongoURI getOutputURI( Configuration conf ){
@@ -441,8 +506,26 @@ public class MongoConfigUtil {
 
     /**
      * if TRUE,
+     * Splits will be queried using $lt/$gt instead of $max and $min.
+     * This allows the database's query optimizer to choose the best index, 
+     * instead of being forced to use the one in the $max/$min keys.
+     * This will only work if the key used for splitting is *not* a compound key.
+     * Make sure that all values under the splitting key are of the same type, or
+     * this will cause incomplete results.
+     * @return
+     */
+    public static boolean isRangeQueryEnabled( Configuration conf ){
+        return conf.getBoolean( SPLITS_USE_RANGEQUERY, false );
+    }
+
+    public static void setRangeQueryEnabled( Configuration conf, boolean value ){
+        conf.setBoolean( SPLITS_USE_RANGEQUERY, value );
+    }
+
+    /**
+     * if TRUE,
      * Splits will be read by connecting to the individual shard servers,
-     *  however this really isn't safe unless you know what you're doing.
+     * Only use this 
      *  ( issue has to do with chunks moving / relocating during balancing phases)
      * @return
      */

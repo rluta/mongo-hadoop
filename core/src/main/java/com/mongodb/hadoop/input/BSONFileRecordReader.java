@@ -17,6 +17,8 @@ import org.bson.*;
 
 import java.io.DataInputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.io.InputStream;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
@@ -38,13 +40,20 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * limitations under the License.
  */
 
-public class BSONFileRecordReader extends RecordReader<NullWritable, BSONWritable> {
+public class BSONFileRecordReader extends RecordReader<NullWritable, BSONObject> {
     private FileSplit fileSplit;
     private Configuration conf;
     private BSONLoader rdr;
     private static final Log log = LogFactory.getLog(BSONFileRecordReader.class);
     private Object key;
-    private BSONWritable value;
+    private BSONObject value;
+    byte[] headerBuf = new byte[4];
+    private FSDataInputStream in;
+    private int numDocsRead = 0;
+    private boolean finished = false;
+
+    BasicBSONCallback callback = new BasicBSONCallback();
+    BasicBSONDecoder decoder = new BasicBSONDecoder();
 
     @Override
     public void initialize(InputSplit inputSplit, TaskAttemptContext context) throws IOException, InterruptedException {
@@ -52,18 +61,40 @@ public class BSONFileRecordReader extends RecordReader<NullWritable, BSONWritabl
         this.conf = context.getConfiguration();
         Path file = fileSplit.getPath();
         FileSystem fs = file.getFileSystem(conf);
-        FSDataInputStream in = null;
-        in = fs.open(file);
-        rdr = new BSONLoader(in);
+        in = fs.open(file, 16*1024*1024);
+        in.seek(fileSplit.getStart());
     }
 
     @Override
     public boolean nextKeyValue() throws IOException, InterruptedException {
-        if (rdr.hasNext()) {
-            value = new BSONWritable( rdr.next() );
+        try{
+            if(in.getPos() >= this.fileSplit.getStart() + this.fileSplit.getLength()){
+                try{
+                    this.close();
+                }catch(Exception e){
+                }finally{
+                    return false;
+                }
+            }
+
+            callback.reset();
+            int bytesRead = decoder.decode(in, callback);
+            BSONObject bo = (BSONObject)callback.get();
+            value = bo;
+            numDocsRead++;
+            if(numDocsRead % 5000 == 0){
+                log.debug("read " + numDocsRead + " docs from " + this.fileSplit.toString() + " at " + in.getPos());
+            }
             return true;
-        } else {
-            return false;
+        }catch(Exception e){
+            e.printStackTrace();
+            log.warn("Error reading key/value from bson file: " + e.getMessage());
+            try{
+                this.close();
+            }catch(Exception e2){
+            }finally{
+                return false;
+            }
         }
     }
 
@@ -73,18 +104,25 @@ public class BSONFileRecordReader extends RecordReader<NullWritable, BSONWritabl
     }
 
     @Override
-    public BSONWritable getCurrentValue() throws IOException, InterruptedException {
+    public BSONObject getCurrentValue() throws IOException, InterruptedException {
         return value;
     }
 
     @Override
     public float getProgress() throws IOException, InterruptedException {
-        return rdr.hasNext() ? 1.0f : 0.0f;
+        if(this.finished)
+            return 1f;
+        if(in != null)
+            return new Float(in.getPos() - this.fileSplit.getStart()) / this.fileSplit.getLength();
+        return 0f;
     }
 
     @Override
     public void close() throws IOException {
-        // do nothing
+        this.finished = true;
+        if(this.in != null){
+            in.close();
+        }
     }
 
 }

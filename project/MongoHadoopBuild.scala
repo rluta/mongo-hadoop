@@ -73,12 +73,17 @@ object MongoHadoopBuild extends Build {
                                      base = file("examples/treasury_yield"),
                                      settings = exampleSettings ) dependsOn( core )
 
+  lazy val enronExample  = Project( id = "enron-example",
+                                     base = file("examples/enron"),
+                                     settings = exampleSettings ) dependsOn( core )
+
 
 
   lazy val baseSettings = Defaults.defaultSettings ++ buildSettings ++ Seq( 
     resolvers ++= Seq(Resolvers.mitSimileRepo, Resolvers.clouderaRepo, Resolvers.mavenOrgRepo, Resolvers.sonatypeRels),
 
     libraryDependencies += ("com.novocode" % "junit-interface" % "0.8" % "test"),
+    libraryDependencies += ("commons-lang" % "commons-lang" % "2.3"),
     libraryDependencies <<= (libraryDependencies) { deps =>
       
       val scala: ModuleID = deps.find { x => x.name == "scala-library" }.map ( y => 
@@ -285,7 +290,8 @@ object MongoHadoopBuild extends Build {
       println("*** Adding Pig Dependency for Version '%s'".format(pigVersion))
 
       Seq(
-        "org.apache.pig" % "pig" % pigVersion      
+        "org.apache.pig" % "pig" % pigVersion,
+        "org.antlr" % "antlr" % "3.4"
       )
     }
   }
@@ -315,7 +321,7 @@ object Resolvers {
 }
 
 object Dependencies {
-  val mongoJavaDriver = "org.mongodb" % "mongo-java-driver" % "2.7.3"
+  val mongoJavaDriver = "org.mongodb" % "mongo-java-driver" % "2.10.1"
   val junit = "junit" % "junit" % "4.10" % "test"
   val flume = "com.cloudera" % "flume-core" % "0.9.4-cdh3u3"
   val hiveSerDe = "org.apache.hive" % "hive-serde" % "0.9.0"

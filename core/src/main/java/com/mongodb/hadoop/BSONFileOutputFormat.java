@@ -1,63 +1,49 @@
-package com.mongodb.hadoop;
-
-import com.mongodb.hadoop.io.BSONFile;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.mapreduce.RecordWriter;
-import org.apache.hadoop.mapreduce.TaskAttemptContext;
-import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
-
-import java.io.IOException;
-
-/**
- * Copyright (c) 2008 - 2012 10gen, Inc. <http://10gen.com>
- * <p/>
+/*
+ * Copyright 2010 10gen Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * <p/>
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * <p/>
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
-  */
+ */
 
- public class BSONFileOutputFormat<K, V> extends FileOutputFormat<K, V> {
+package com.mongodb.hadoop;
 
-    @Override
-    public RecordWriter<K, V> getRecordWriter( TaskAttemptContext context )
-           throws IOException, InterruptedException {
+// Mongo
 
-     final Configuration conf = context.getConfiguration();
+import com.mongodb.hadoop.output.*;
+import com.mongodb.hadoop.util.*;
+import org.apache.commons.logging.*;
+import org.apache.hadoop.mapreduce.*;
 
-     /* TODO - Look into supporting compression, though mongoimport can't read from it
-      *        ... it may be useful for people feeding data further through Hadoop, etc.
-      */
+// Commons
+// Hadoop
 
-     // get the path of the temporary output file
-     final Path file = getDefaultWorkFile(context, "");
-     final FileSystem fs = file.getFileSystem(conf);
+public class BSONFileOutputFormat<K, V> extends OutputFormat<K, V> {
 
-     final BSONFile.Writer out = new BSONFile.Writer<K, V>(fs, conf, file);
+    public void checkOutputSpecs( final JobContext context ){ }
 
-     return new RecordWriter<K, V>() {
-
-         public void write(K key, V value) throws IOException {
-           out.append(key, value);
-         }
-
-        public void close(TaskAttemptContext context) throws IOException {
-          out.close();
-        }
-      };
+    public OutputCommitter getOutputCommitter( final TaskAttemptContext context ){
+        return new MongoOutputCommiter();
     }
 
-    private static final Log log = LogFactory.getLog(BSONFileOutputFormat.class);
+    /**
+     * Get the record writer that points to the output collection.
+     */
+    public RecordWriter<K, V> getRecordWriter( final TaskAttemptContext context ){
+        return new BSONFileRecordWriter( context );
+    }
 
+    public BSONFileOutputFormat(){ 
+    }
+
+    private static final Log LOG = LogFactory.getLog( BSONFileOutputFormat.class );
 }
+

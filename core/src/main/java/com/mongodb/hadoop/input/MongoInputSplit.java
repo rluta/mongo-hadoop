@@ -27,13 +27,15 @@ import org.bson.*;
 import java.io.*;
 import java.util.*;
 
-public class MongoInputSplit extends InputSplit implements Writable {
+public class MongoInputSplit extends InputSplit implements Writable, org.apache.hadoop.mapred.InputSplit {
 
     public MongoInputSplit( MongoURI inputURI,
                             String keyField,
                             DBObject query,
                             DBObject fields,
                             DBObject sort,
+                            Object specialMin,
+                            Object specialMax,
                             int limit,
                             int skip,
                             boolean noTimeout ){
@@ -49,6 +51,8 @@ public class MongoInputSplit extends InputSplit implements Writable {
         _limit = limit;
         _skip = skip;
         _notimeout = noTimeout;
+        _specialMin = specialMin;
+        _specialMax = specialMax;
         getCursor();
         getBSONDecoder();
         getBSONEncoder();
@@ -86,6 +90,8 @@ public class MongoInputSplit extends InputSplit implements Writable {
                                                add( "sort", _sortSpec ).
                                                add( "limit", _limit ).
                                                add( "skip", _skip ).
+                                               add( "specialMin", _specialMin).
+                                               add( "specialMax", _specialMax).
                                                add( "notimeout", _notimeout ).get();
 
         byte[] buf = enc.encode( spec );
@@ -122,24 +128,29 @@ public class MongoInputSplit extends InputSplit implements Writable {
         _querySpec = new BasicDBObject( ((BSONObject) spec.get( "query" )).toMap() );
         _fieldSpec = new BasicDBObject( ((BSONObject) spec.get( "field" )).toMap() ) ;
         _sortSpec = new BasicDBObject( ((BSONObject) spec.get( "sort" )).toMap() );
+        _specialMin = spec.get("specialMin");
+        _specialMax = spec.get("specialMax");
         _limit = (Integer) spec.get( "limit" );
         _skip = (Integer) spec.get( "skip" );
         _notimeout = (Boolean) spec.get( "notimeout" );
         getCursor();
-
         log.info( "Deserialized MongoInputSplit ... { length = " + getLength() + ", locations = "
                    + Arrays.toString( getLocations() ) + ", keyField = " + _keyField + ", query = " + _querySpec
                    + ", fields = " + _fieldSpec + ", sort = " + _sortSpec + ", limit = " + _limit + ", skip = "
-                   + _skip + ", noTimeout = " + _notimeout + "}" );
+                   + _skip + ", noTimeout = " + _notimeout + ", specialMin = " + _specialMin
+                   + ", specialMax = " + _specialMax + "}" );
     }
 
-    DBCursor getCursor(){
+    public DBCursor getCursor(){
         // Return the cursor with the split's query, etc. already slotted in for
         // them.
         // todo - support limit/skip
         if ( _cursor == null ){
+            log.debug("reading data from " + _mongoURI);
             _cursor = MongoConfigUtil.getCollection( _mongoURI ).find( _querySpec, _fieldSpec ).sort( _sortSpec );
             if (_notimeout) _cursor.setOptions( Bytes.QUERYOPTION_NOTIMEOUT );
+            if (_specialMin != null) _cursor.addSpecial("$min", this._specialMin);
+            if (_specialMax != null) _cursor.addSpecial("$max", this._specialMax);
             _cursor.slaveOk();
         }
 
@@ -160,7 +171,10 @@ public class MongoInputSplit extends InputSplit implements Writable {
 
     @Override
     public String toString(){
-        return "MongoInputSplit{URI=" + _mongoURI + ", keyField=" + _keyField + ", query=" + _querySpec + ", sort=" + _sortSpec + ", fields=" + _fieldSpec + '}';
+        return "MongoInputSplit{URI=" + _mongoURI + ", keyField=" + _keyField
+             + ", min=" + _specialMin + ", max=" + _specialMax 
+             + ", query=" + _querySpec + ", sort=" + _sortSpec
+             + ", fields=" + _fieldSpec + '}';
     }
 
     public MongoInputSplit(){ }
@@ -227,7 +241,9 @@ public class MongoInputSplit extends InputSplit implements Writable {
     }
 
     private MongoURI _mongoURI;
-    private String _keyField;
+    private String _keyField = "_id";
+    private Object _specialMin = null;
+    private Object _specialMax = null;
     private DBObject _querySpec;
     private DBObject _fieldSpec;
     private DBObject _sortSpec;

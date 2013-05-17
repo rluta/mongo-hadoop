@@ -5,6 +5,8 @@ import com.mongodb.hadoop.*;
 import com.mongodb.hadoop.input.*;
 import org.apache.commons.logging.*;
 import org.apache.hadoop.mapreduce.*;
+import org.bson.types.MinKey;
+import org.bson.types.MaxKey;
 
 import java.net.UnknownHostException;
 import java.util.*;
@@ -43,6 +45,18 @@ public class MongoSplitter {
         DBCollection coll = MongoConfigUtil.getCollection(uri);
         DB db = coll.getDB(); 
         Mongo mongo = db.getMongo();
+
+        if( conf.getAuthURI() != null ){
+            MongoURI authURI = conf.getAuthURI();
+            if(authURI.getUsername() != null &&
+               authURI.getPassword() != null &&
+               !authURI.getDatabase().equals(db.getName()))
+            {
+                DB authTargetDB = mongo.getDB(authURI.getDatabase());
+                authTargetDB.authenticate(authURI.getUsername(),
+                                          authURI.getPassword());
+            }
+        }
         
         final CommandResult stats = coll.getStats();
         
@@ -55,13 +69,14 @@ public class MongoSplitter {
 
         final boolean slaveOk = conf.canReadSplitsFromSecondary();
 
-        log.info(" Calculate Splits Code ... Use Shards? " + useShards + ", Use Chunks? " + useChunks + "; Collection Sharded? " + isSharded);
+        final boolean useRangeQuery = conf.isRangeQueryEnabled();
+
+        log.info(" Calculate Splits Code ... Use Shards? " + useShards + ", Use Chunks? " + useChunks + "; Collection Sharded? " + isSharded + "; Use Rang queries? " + useRangeQuery);
         if (conf.createInputSplits()) {
             log.info( "Creation of Input Splits is enabled." );
             if (isSharded && (useShards || useChunks)){  // todo I don't think these settings can be run together
                 if (useShards && useChunks)
                     log.warn( "Combining 'use chunks' and 'read from shards directly' can have unexpected & erratic behavior in a live system due to chunk migrations. " );
-
                 log.info( "Sharding mode calculation entering." );
                 return calculateShardedSplits( conf, useShards, useChunks, slaveOk, uri, mongo );
             }
@@ -84,7 +99,7 @@ public class MongoSplitter {
         final int splitSize = conf.getSplitSize(); // in MB
         final String ns = coll.getFullName();
         final DBObject q = conf.getQuery();
-        
+
         log.info( "Calculating unsharded input splits on namespace '" + ns + "' with Split Key '" + splitKey.toString() + "' and a split size of '" + splitSize + "'mb per" );
 
         final DBObject cmd = BasicDBObjectBuilder.start("splitVector", ns).
@@ -132,24 +147,18 @@ public class MongoSplitter {
 
     private static MongoInputSplit _split( MongoConfig conf, DBObject q, DBObject min, DBObject max ) {
         BasicDBObjectBuilder b = BasicDBObjectBuilder.start( "$query", q );
-        if (min != null) // min ceiling
-           b.add( "$min", min );
-        
-        if (max != null) // max ceiling
-            b.add( "$max", max );
-
         final DBObject query = b.get();
         log.trace( "Assembled Query: " + query );
 
         return new MongoInputSplit( conf.getInputURI(), conf.getInputKey(), query, conf.getFields(), 
-                                    conf.getSort(), conf.getLimit(), conf.getSkip(), conf.isNoTimeout() );
+                                    conf.getSort(), min, max, conf.getLimit(), conf.getSkip(), conf.isNoTimeout() );
     }
     
     private static List<InputSplit> calculateSingleSplit( MongoConfig conf ){
         final List<InputSplit> splits = new ArrayList<InputSplit>( 1 );
         // no splits, no sharding
         splits.add( new MongoInputSplit( conf.getInputURI(), conf.getInputKey(), conf.getQuery(), 
-                                         conf.getFields(), conf.getSort(), conf.getLimit(), conf.getSkip(),
+                                         conf.getFields(), conf.getSort(), null, null, conf.getLimit(), conf.getSkip(),
                                          conf.isNoTimeout() ) );
 
 
@@ -227,7 +236,7 @@ public class MongoSplitter {
         for ( String host : shardSet ){
             MongoURI thisUri = getNewURI( uri, host, slaveOk );
             splits.add( new MongoInputSplit( thisUri, conf.getInputKey(), conf.getQuery(), conf.getFields(),
-                                             conf.getSort(), conf.getLimit(), conf.getSkip(), 
+                                             conf.getSort(), null, null, conf.getLimit(), conf.getSkip(), 
                                              conf.isNoTimeout() ) ); // TODO - Should the input Key be the shard key?
         }
         return splits;
@@ -246,6 +255,11 @@ public class MongoSplitter {
         if ( useShards )
             log.warn( "WARNING getting splits that connect directly to the backend mongods"
                       + " is risky and might not produce correct results" );
+
+        if ( conf.isRangeQueryEnabled() ){
+            log.warn( "WARNING using range queries can produce incorrect results if values"
+                      + " stored under the splitting key have different types.");
+        }
 
         if ( log.isDebugEnabled() ){
             log.debug( "getSplitsUsingChunks(): originalQuery: " + originalQuery );
@@ -307,8 +321,8 @@ public class MongoSplitter {
                 final BasicDBObject row = (BasicDBObject) cur.next();
                 DBObject minObj = ( (DBObject) row.get( "min" ) );
                 DBObject shardKeyQuery = new BasicDBObject();
-                DBObject min = new BasicDBObject();
-                DBObject max = new BasicDBObject();
+                BasicDBObject min = new BasicDBObject();
+                BasicDBObject max = new BasicDBObject();
 
                 for ( String keyName : minObj.keySet() ){
                     Object tMin = minObj.get( keyName );
@@ -319,12 +333,48 @@ public class MongoSplitter {
                     if ( !( tMax == SplitFriendlyDBCallback.MAX_KEY_TYPE || tMax.equals( "MaxKey" ) ) )
                         max.put( keyName, tMax );
                 }
+
+
                 /** We have to put something for $query or we'll fail; if no original query use an empty DBObj */
                 if ( originalQuery == null )
                     originalQuery = new BasicDBObject();
-                shardKeyQuery.put( "$min", min );
-                shardKeyQuery.put( "$max", max );
+
+                DBObject splitQuery = originalQuery;
+
+                boolean useMinMax = true;
+                if( conf.isRangeQueryEnabled() ){
+                    Map.Entry<String, Object> minKey = min.size() == 1 ?
+                        min.entrySet().iterator().next() : null;
+                    Map.Entry<String, Object> maxKey = max.size() == 1 ?
+                        max.entrySet().iterator().next() : null;
+                    if(minKey == null && maxKey == null ){
+                        throw new IllegalArgumentException("Range query is enabled but one or more split boundaries contains a compound key:\n" +
+                                  "minKey:  " + min.toString() +  "\n" +
+                                  "maxKey:  " + max.toString());
+                    }
+
+                    if( (minKey != null && originalQuery.containsKey(minKey.getKey())) ||
+                        (maxKey != null && originalQuery.containsKey(maxKey.getKey())) ){
+                        throw new IllegalArgumentException("Range query is enabled but split key conflicts with query filter:\n" +
+                                  "minKey:  " + min.toString() +  "\n" +
+                                  "maxKey:  " + max.toString() +  "\n" + 
+                                  "query:  " + originalQuery.toString());
+                    }
+                    BasicDBObject rangeObj = new BasicDBObject();
+                    if( minKey!=null )//&& !SplitFriendlyDBCallback.MIN_KEY_TYPE.equals(minKey.getValue())){
+                        rangeObj.put("$gte", minKey.getValue());
+                    //}
+                    if( maxKey!=null )//&& !SplitFriendlyDBCallback.MAX_KEY_TYPE.equals(maxKey.getValue())){
+                        rangeObj.put("$lt", maxKey.getValue());
+                    //}
+                    splitQuery = new BasicDBObject();
+                    splitQuery.putAll(originalQuery);
+                    splitQuery.put(minKey.getKey(), rangeObj);
+                    useMinMax = false;
+                }
+
                 shardKeyQuery.put( "$query", originalQuery );
+
 
                 if ( log.isDebugEnabled() ){
                     log.debug( "[" + numChunks + "/" + numExpectedChunks + "] new query is: " + shardKeyQuery );
@@ -339,10 +389,31 @@ public class MongoSplitter {
 
                     inputURI = getNewURI( inputURI, host, slaveOk );
                 }
-                splits.add(
-                        new MongoInputSplit( inputURI, conf.getInputKey(), shardKeyQuery, conf.getFields(), conf.getSort(),  // TODO - should inputKey be the shard key?
-                                             conf.getLimit(), conf.getSkip(), 
-                                             conf.isNoTimeout() ) );
+                if(useMinMax){
+                    MongoInputSplit split = new MongoInputSplit( inputURI,
+                            conf.getInputKey(),
+                            splitQuery,
+                            conf.getFields(),
+                            conf.getSort(),  // TODO - should inputKey be the shard key?
+                            min,
+                            max,
+                            conf.getLimit(),
+                            conf.getSkip(), 
+                            conf.isNoTimeout());
+                    splits.add(split);
+                }else{
+                    MongoInputSplit split = new MongoInputSplit( inputURI,
+                            conf.getInputKey(),
+                            splitQuery,
+                            conf.getFields(),
+                            conf.getSort(),  // TODO - should inputKey be the shard key?
+                            null,
+                            null,
+                            conf.getLimit(),
+                            conf.getSkip(), 
+                            conf.isNoTimeout());
+                    splits.add(split);
+                }
             }
 
             if ( log.isDebugEnabled() ){

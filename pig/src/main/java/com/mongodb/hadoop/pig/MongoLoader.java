@@ -1,52 +1,82 @@
 package com.mongodb.hadoop.pig;
 
-import com.mongodb.*;
-import com.mongodb.hadoop.*;
-import com.mongodb.hadoop.input.*;
-import com.mongodb.hadoop.output.MongoRecordWriter;
-import com.mongodb.hadoop.util.*;
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
 
-import org.apache.commons.logging.*;
-import org.apache.hadoop.conf.*;
-import org.apache.hadoop.io.Text;
-import org.apache.hadoop.mapreduce.*;
-import org.apache.pig.*;
-import org.apache.pig.backend.hadoop.executionengine.mapReduceLayer.PigSplit;
-import org.apache.pig.data.*;
-import org.apache.pig.impl.logicalLayer.FrontendException;
-import org.apache.pig.impl.util.*;
-import org.apache.pig.LoadPushDown;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.mapreduce.InputFormat;
+import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.mapreduce.RecordReader;
+import org.apache.pig.Expression;
+import org.apache.pig.LoadFunc;
+import org.apache.pig.LoadMetadata;
 import org.apache.pig.ResourceSchema;
-import org.apache.pig.LoadPushDown.RequiredField;
-import org.apache.pig.LoadPushDown.RequiredFieldResponse;
 import org.apache.pig.ResourceSchema.ResourceFieldSchema;
+import org.apache.pig.ResourceStatistics;
+import org.apache.pig.backend.hadoop.executionengine.mapReduceLayer.PigSplit;
+import org.apache.pig.data.BagFactory;
+import org.apache.pig.data.DataBag;
+import org.apache.pig.data.DataType;
+import org.apache.pig.data.Tuple;
+import org.apache.pig.data.TupleFactory;
+import org.apache.pig.impl.util.Utils;
 import org.bson.BSONObject;
 
+import com.mongodb.BasicDBList;
+import com.mongodb.BasicDBObject;
+import com.mongodb.hadoop.MongoInputFormat;
+import com.mongodb.hadoop.input.MongoRecordReader;
+import com.mongodb.hadoop.util.MongoConfigUtil;
 
-import java.io.*;
-import java.text.ParseException;
-import java.util.*;
-
-public class MongoLoader extends LoadFunc implements LoadPushDown {
+public class MongoLoader extends LoadFunc implements LoadMetadata {
 	private static final Log log = LogFactory.getLog( MongoStorage.class );
-	private TupleFactory tupleFactory = TupleFactory.getInstance();
-	private BagFactory bagFactory = BagFactory.getInstance();
+	private static TupleFactory tupleFactory = TupleFactory.getInstance();
+	private static BagFactory bagFactory = BagFactory.getInstance();
     // Pig specific settings
     static final String PIG_INPUT_SCHEMA = "mongo.pig.input.schema";
-    static final String PIG_INPUT_SCHEMA_UDF_CONTEXT = "mongo.pig.input.schema.udf_context";
     protected ResourceSchema schema = null;
-    
-    ResourceFieldSchema[] fields;
-    //private final MongoStorageOptions options;
+    private RecordReader in = null;
+    private String _udfContextSignature = null;
+    private final MongoInputFormat inputFormat = new MongoInputFormat();
+    private static final String PIG_INPUT_SCHEMA_UDF_CONTEXT = "mongo.pig.input.schema.udf_context";
+    private ResourceFieldSchema[] fields;
+    private String idAlias = null;
+
+    @Override
+    public void setUDFContextSignature( String signature ){
+        _udfContextSignature = signature;
+    }
     
     public MongoLoader () {
+        log.info("Initializing MongoLoader in schemaless mode.");
+        this.schema = null;
+        this.fields = null;
+    }
+
+    public ResourceFieldSchema[] getFields(){
+        return this.fields;
+    }
     
+    public MongoLoader(String userSchema, String idAlias) {
+        this.idAlias = idAlias;
+    	try {
+			schema = new ResourceSchema(Utils.getSchemaFromString(userSchema));
+			fields = schema.getFields();
+		} catch (Exception e) {
+			throw new IllegalArgumentException("Invalid Schema Format");
+		}
+    }
+
+    public MongoLoader(String userSchema) {
+        this(userSchema, null);
     }
 
 	@Override
 	public void setLocation(String location, Job job) throws IOException {
 		final Configuration config = job.getConfiguration();
-        log.info( "Load Location Config: " + config + " For URI: " + location );
         if ( !location.startsWith( "mongodb://" ) ) {
             throw new IllegalArgumentException("Invalid URI Format.  URIs must begin with a mongodb:// protocol string." );
         }
@@ -56,159 +86,77 @@ public class MongoLoader extends LoadFunc implements LoadPushDown {
 
 	@Override
 	public InputFormat getInputFormat() throws IOException {
-		final MongoInputFormat inputFormat = new MongoInputFormat();
-		log.info("InputFormat..." + inputFormat);
-		return inputFormat;
+        return this.inputFormat;
 	}
 
 	@Override
-	public void prepareToRead(RecordReader reader, PigSplit split)
-			throws IOException {
-		this._recordReader = (MongoRecordReader) reader;
-		log.info("Preparing to read with " + _recordReader);
-		
-		if(_recordReader == null)
+	public void prepareToRead(RecordReader reader, PigSplit split) throws IOException {
+		this.in = reader;
+		if(in == null) {
 			throw new IOException("Invalid Record Reader");
-		
-		UDFContext udfc = UDFContext.getUDFContext();
-		Configuration c = udfc.getJobConf();
-		Properties p = udfc.getUDFProperties(this.getClass(), new String[]{_udfContextSignature});
-		
-		String strSchema = c.get("mongo.pig.output.schema");
-		if(strSchema == null) {
-			throw new IOException("Please define a schema");
 		}
-		
-		try {
-			ResourceSchema schema = new ResourceSchema(Utils.getSchemaFromString(strSchema));
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-        }
-
-		fields = schema.getFields();
-	}
-	private Object readField(Object obj, ResourceFieldSchema field) throws IOException {
-		switch (field.getType()) {
-		case DataType.INTEGER:
-			return Integer.parseInt(obj.toString());
-		case DataType.LONG:
-			return Long.parseLong(obj.toString());
-		case DataType.FLOAT:
-			return Float.parseFloat(obj.toString());
-		case DataType.DOUBLE:
-			return Double.parseDouble(obj.toString());
-		case DataType.BYTEARRAY:
-			return obj;
-		case DataType.CHARARRAY:
-			return obj.toString().toCharArray();
-		case DataType.TUPLE:
-			ResourceSchema s = field.getSchema();
-			ResourceFieldSchema[] fs = s.getFields();
-			Tuple t = tupleFactory.newTuple(fs.length);
-			
-			BasicDBObject val = (BasicDBObject)obj;
-			
-			for(int j = 0; j < fs.length; j++) {
-				t.set(j, readField(val.get(fs[j].getName()) ,fs[j]));
-			}
-			
-			return t;
-			
-		case DataType.BAG:
-			s = field.getSchema();
-			fs = s.getFields();
-			
-			s = fs[0].getSchema();
-			fs = s.getFields();
-			
-			DataBag bag = bagFactory.newDefaultBag();
-			
-			BasicDBList vals = (BasicDBList)obj;
-						
-			for(int j = 0; j < vals.size(); j++) {
-				
-				t = tupleFactory.newTuple(fs.length);
-				for(int k = 0; k < fs.length; k++) {
-					t.set(k, readField(((BasicDBObject)vals.get(j)).get(fs[k].getName()), fs[k]));
-				}
-				bag.add(t);
-			}
-			
-			
-			return bag;
-		default:
-			return obj;
-		}
-		
 	}
 	
 	@Override
 	public Tuple getNext() throws IOException {
 		BSONObject val = null;
 		try {
-			if(!_recordReader.nextKeyValue()) return null;
-			
-			val = _recordReader.getCurrentValue();
-		}
-		catch (Exception ie) {
+			if(!in.nextKeyValue()) return null;
+			val = (BSONObject)in.getCurrentValue();
+		} catch (Exception ie) {
 			throw new IOException(ie);
 		}
 		
-		Tuple t = tupleFactory.newTuple(fields.length);
-		
-		for(int i = 0; i < fields.length; i++) {
-			t.set(i, readField(val.get(fields[i].getName()), fields[i]));
-		}
-		
-		//log.info("Line:" + val.toString());
-		
-		//log.info("Projection String: " + this.projectionArray);
-		/*ArrayList<Object> protoTuple = new ArrayList<Object>();
-		
-		for(String key: val.keySet())
-		{
-			if(projectionArray.contains(key)) {
-				protoTuple.add(projectionArray.indexOf(key), val.get(key));
-			}
-		}
-		
-		Tuple t = tupleFactory.newTuple(protoTuple);*/
-		
-		//Tuple t = tupleFactory.newTuple(2);
-		//t.set(0, "test");
-		
-		
-		return t;
+        Tuple t;
+        if( this.fields == null ){
+            // Schemaless mode - just output a tuple with a single element,
+            // which is a map storing the keys/vals in the document
+            t = tupleFactory.newTuple(1);
+            t.set(0, BSONLoader.convertBSONtoPigType(val));
+        }else{
+            t = tupleFactory.newTuple(fields.length);
+            for(int i = 0; i < fields.length; i++) {
+                String fieldTemp = fields[i].getName();
+                if(this.idAlias != null && this.idAlias.equals(fieldTemp)){
+                    fieldTemp = "_id";
+                }
+                t.set(i, BSONLoader.readField(val.get(fieldTemp), fields[i]));
+            }
+        }
+        return t;
 	}
 	
-	public String relativeToAbsolutePath(String location, org.apache.hadoop.fs.Path curDir)
-     throws IOException {
-        // Don't convert anything - override to keep base from messing with URI
-        log.info( "Converting path: " + location + "(curDir: " + curDir + ")" );
+	public String relativeToAbsolutePath(String location, org.apache.hadoop.fs.Path curDir) throws IOException {
+        // This is a mongo URI and has no notion of relative/absolute,
+        // thus we want to always use just the same location.
         return location;
     }
     
-    @Override
-    public void setUDFContextSignature( String signature ){
-        _udfContextSignature = signature;
-    }
-
-    String _udfContextSignature = null;
-    MongoRecordReader _recordReader = null;
 
 	@Override
-	public List<OperatorSet> getFeatures() {
-		// TODO Auto-generated method stub
+	public ResourceSchema getSchema(String location, Job job) throws IOException {
+		if (schema != null) {
+			return schema;
+		}
 		return null;
 	}
 
 	@Override
-	public RequiredFieldResponse pushProjection(
-			RequiredFieldList requiredFieldList) throws FrontendException {
-		log.info("HERE");
+	public ResourceStatistics getStatistics(String location, Job job) throws IOException {
+        // No statistics available. In the future
+        // we could maybe construct something from db.collection.stats() here
+        // but the class/API for this is unstable anyway, so this is unlikely
+        // to be high priority.
 		return null;
 	}
 
+	@Override
+	public String[] getPartitionKeys(String location, Job job) throws IOException {
+        // No partition keys. 
+		return null;
+	}
+
+	@Override
+	public void setPartitionFilter(Expression partitionFilter) throws IOException { }
 
 }

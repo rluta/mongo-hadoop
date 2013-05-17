@@ -35,6 +35,7 @@ import java.text.ParseException;
 import java.util.*;
 
 public class MongoStorage extends StoreFunc implements StoreMetadata {
+
     private static final Log log = LogFactory.getLog( MongoStorage.class );
     // Pig specific settings
     static final String PIG_OUTPUT_SCHEMA = "mongo.pig.output.schema";
@@ -68,6 +69,8 @@ public class MongoStorage extends StoreFunc implements StoreMetadata {
 
 
     public void checkSchema( ResourceSchema schema ) throws IOException{
+        log.info("checking schema " + schema.toString());
+        this.schema = schema;
         final Properties properties =
                 UDFContext.getUDFContext().getUDFProperties( this.getClass(), new String[] { _udfContextSignature } );
         properties.setProperty( PIG_OUTPUT_SCHEMA_UDF_CONTEXT, schema.toString());
@@ -84,6 +87,7 @@ public class MongoStorage extends StoreFunc implements StoreMetadata {
 
 
     public void putNext( Tuple tuple ) throws IOException{
+        log.info("writing " + tuple.toString());
         final Configuration config = _recordWriter.getContext().getConfiguration();
         final List<String> schema = Arrays.asList( config.get( PIG_OUTPUT_SCHEMA ).split( "," ) );
         final BasicDBObjectBuilder builder = BasicDBObjectBuilder.start();
@@ -92,10 +96,12 @@ public class MongoStorage extends StoreFunc implements StoreMetadata {
         for (int i = 0; i < fields.length; i++) {
             writeField(builder, fields[i], tuple.get(i));
         }
+        
+        log.info("writing out:" + builder.get().toString());
         _recordWriter.write( null, builder.get() );
     }
 
-    private void writeField(BasicDBObjectBuilder builder,
+    protected void writeField(BasicDBObjectBuilder builder,
                             ResourceSchema.ResourceFieldSchema field,
                             Object d) throws IOException {
 
@@ -237,6 +243,12 @@ public class MongoStorage extends StoreFunc implements StoreMetadata {
 
                 builder.add( fname, a);
                 return;
+            case DataType.MAP:
+                Map map = (Map) d;
+                for(Object key : map.keySet()) {
+                    builder.add(key.toString(), map.get(key));
+                }
+                return;
         }
     }
 
@@ -259,7 +271,7 @@ public class MongoStorage extends StoreFunc implements StoreMetadata {
 
         try {
         // Parse the schema from the string stored in the properties object.
-            schema = new ResourceSchema(Utils.getSchemaFromString(strSchema));
+            this.schema = new ResourceSchema(Utils.getSchemaFromString(strSchema));
         }
         catch (Exception e) {
             e.printStackTrace();
@@ -275,13 +287,11 @@ public class MongoStorage extends StoreFunc implements StoreMetadata {
 
     public OutputFormat getOutputFormat() throws IOException{
         final MongoOutputFormat outputFmt = options == null ? new MongoOutputFormat() : new MongoOutputFormat(options.getUpdate().keys, options.getUpdate().multi);
-        log.info( "OutputFormat... " + outputFmt );
         return outputFmt;
     }
 
     public String relToAbsPathForStoreLocation( String location, org.apache.hadoop.fs.Path curDir ) throws IOException{
         // Don't convert anything - override to keep base from messing with URI
-        log.info( "Converting path: " + location + "(curDir: " + curDir + ")" );
         return location;
     }
 

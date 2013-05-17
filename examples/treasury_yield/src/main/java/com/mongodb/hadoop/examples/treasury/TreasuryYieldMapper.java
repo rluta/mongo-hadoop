@@ -28,6 +28,7 @@ import org.apache.hadoop.conf.*;
 import org.apache.hadoop.io.*;
 import org.apache.hadoop.mapreduce.*;
 
+import com.mongodb.hadoop.io.BSONWritable;
 // Java
 import java.io.*;
 import java.util.*;
@@ -36,15 +37,15 @@ import java.util.*;
  * The treasury yield mapper.
  */
 public class TreasuryYieldMapper
-        extends Mapper<Date, BSONObject, IntWritable, DoubleWritable> {
+        extends Mapper<Object, BSONObject, IntWritable, DoubleWritable> {
 
     @Override
-    public void map( final Date pKey,
+    public void map( final Object pKey,
                      final BSONObject pValue,
                      final Context pContext )
             throws IOException, InterruptedException{
 
-        final int year = pKey.getYear() + 1900;
+        final int year = ((Date)pValue.get("_id")).getYear() + 1900;
         double bid10Year = ( (Number) pValue.get( "bc10Year" ) ).doubleValue();
 
         pContext.write( new IntWritable( year ), new DoubleWritable( bid10Year ) );
