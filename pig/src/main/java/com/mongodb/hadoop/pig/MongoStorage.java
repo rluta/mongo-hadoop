@@ -108,8 +108,8 @@ public class MongoStorage extends StoreFunc implements StoreMetadata {
 		String fname = field.getName();
 		
         // If the field is missing or the value is null, write a null unless 
-        if ((d == null)&&(this.options.shouldDropNull() == false)) {
-            builder.add( field.getName(), d );
+        if (d == null) {
+            if (!this.options.shouldDropNull()) builder.add( field.getName(), d );
             return;
         }
 
@@ -166,7 +166,7 @@ public class MongoStorage extends StoreFunc implements StoreMetadata {
                 return;
 
 			case DataType.MAP:
-			case DataType.INTERNALMAP: 
+			case DataType.INTERNALMAP:
 				Map<Object, Object> mm = (Map<Object, Object>)d;
 				Iterator<Map.Entry<Object, Object> > i = mm.entrySet().iterator();
 
@@ -242,12 +242,6 @@ public class MongoStorage extends StoreFunc implements StoreMetadata {
                 }
 
                 builder.add( fname, a);
-                return;
-            case DataType.MAP:
-                Map map = (Map) d;
-                for(Object key : map.keySet()) {
-                    builder.add(key.toString(), map.get(key));
-                }
                 return;
         }
     }

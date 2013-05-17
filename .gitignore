@@ -38,3 +38,4 @@ testing/*.pyc
 *.jar
 streaming/language_support/python/dist/
 streaming/language_support/python/pymongo_hadoop.egg-info/
+hive/target/*
