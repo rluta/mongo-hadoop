@@ -16,6 +16,7 @@ import org.apache.hadoop.mapred.RecordReader;
 
 import java.util.ArrayList;
 import java.io.IOException;
+import org.apache.commons.logging.*;
 
 /**
  * Copyright (c) 2008 - 2012 10gen, Inc. <http://10gen.com>
@@ -35,36 +36,43 @@ import java.io.IOException;
 
 public class BSONFileInputFormat extends FileInputFormat {
 
+    private static final Log log = LogFactory.getLog( BSONFileInputFormat.class );
+
     protected boolean isSplitable(JobContext context, Path filename) {
         return true;
     }
 
     @Override
     public org.apache.hadoop.mapred.FileSplit[] getSplits(JobConf job, int numSplits) throws IOException {
-        BSONSplitter splitter = new BSONSplitter();
-        splitter.setConf(job);
-        Path[] inputPaths = splitter.getInputPaths();
-        ArrayList<FileStatus> filesToProcess = new ArrayList<FileStatus>();
-        for(Path inputPath : inputPaths){
-            filesToProcess.addAll(splitter.getFilesInPath(inputPath));
-        }
-        for(FileStatus inputFile : filesToProcess){
-            Path path = inputFile.getPath();
-            Path splitFilePath =  new Path(path.getParent(),  "." + path.getName() + ".splits");
-            FileSystem fs = path.getFileSystem(job);
+
+        FileStatus[] inputFiles = listStatus(job);
+        //Using fully-qualified class names here to avoid confusion between the two APIs, because
+        //mapred.* vs. mapreduce.* are both needed here and it gets pretty impossible to read otherwise.
+        ArrayList<org.apache.hadoop.mapred.FileSplit> results = new ArrayList<org.apache.hadoop.mapred.FileSplit>();
+        for(FileStatus file : inputFiles){
+            BSONSplitter splitter = new BSONSplitter();
+            splitter.setConf(job);
+            splitter.setInputPath(file.getPath());
+            Path splitFilePath;
+            splitFilePath = new Path(file.getPath().getParent(),  "." + file.getPath().getName() + ".splits");
             try{
-                splitter.loadSplitsFromSplitFile(inputFile, splitFilePath);
+                splitter.loadSplitsFromSplitFile(file, splitFilePath);
             }catch(BSONSplitter.NoSplitFileException nsfe){
-                splitter.readSplitsForFile(inputFile);
+                log.info("No split file for " + file + "; building split file");
+                splitter.readSplitsForFile(file);
+            }
+            log.info("BSONSplitter found " + splitter.getAllSplits().size() + " splits.");
+
+            for(org.apache.hadoop.mapreduce.lib.input.FileSplit split : splitter.getAllSplits() ){
+                org.apache.hadoop.mapred.FileSplit fsplit =
+                    new org.apache.hadoop.mapred.FileSplit(split.getPath(),
+                                                           split.getStart(),
+                                                           split.getLength(),
+                                                           split.getLocations());
+                results.add(fsplit);
             }
         }
-
-        ArrayList<org.apache.hadoop.mapreduce.lib.input.FileSplit> newsplits = splitter.getAllSplits();
-        ArrayList<org.apache.hadoop.mapred.FileSplit> results = new ArrayList<org.apache.hadoop.mapred.FileSplit>(newsplits.size());
-        for(org.apache.hadoop.mapreduce.lib.input.FileSplit split : newsplits ){
-            org.apache.hadoop.mapred.FileSplit fsplit = new org.apache.hadoop.mapred.FileSplit(split.getPath(), split.getStart(), split.getLength(), split.getLocations());
-            results.add(fsplit);
-        }
+        log.info("Total of " + results.size() + " found.");
         return results.toArray(new org.apache.hadoop.mapred.FileSplit[0]);
     }
 

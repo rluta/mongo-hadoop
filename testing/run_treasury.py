@@ -9,9 +9,12 @@ import mongo_manager
 import subprocess
 import os
 import shutil
-from bson_splitter import split_bson
 from datetime import timedelta
 import time
+
+import sys
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools'))
+from bson_splitter import split_bson
 
 CLEANUP_TMP=os.environ.get('CLEANUP_TMP', True)
 HADOOP_HOME=os.environ['HADOOP_HOME']
@@ -20,6 +23,7 @@ AWS_SECRET=os.environ.get('AWS_SECRET',None)
 AWS_ACCESSKEY=os.environ.get('AWS_ACCESSKEY',None) 
 TEMPDIR=os.environ.get('TEMPDIR','/tmp')
 USE_ASSEMBLY=os.environ.get('USE_ASSEMBLY', True)
+num_runs = 0
 
 if not os.path.isdir(TEMPDIR):
     os.makedirs(TEMPDIR)
@@ -27,12 +31,12 @@ if not os.path.isdir(TEMPDIR):
 
 #declare -a job_args
 #cd ..
-VERSION_SUFFIX = "1.1.0-SNAPSHOT"
+VERSION_SUFFIX = "1.1.0"
 
 version_buildtarget =\
     {"0.22" : "0.22.0",
-     "1.0" : "1.0.3",
-     "cdh4" : "cdh4b1",
+     "1.0" : "1.0.4",
+     "cdh4" : "cdh4.3.0",
      "0.20" : "0.20.205.0",
      "0.23" : "0.23.1",
      "cdh3" :"cdh3u3"}
@@ -184,6 +188,7 @@ def runbsonjob(input_path, params, hostname,
     cmd.append("jar")
     cmd.append(JOBJAR_PATH)
     cmd.append(className)
+    print cmd
 
     for key, val in params.items():
         cmd.append("-D")
@@ -207,12 +212,13 @@ def runstreamingjob(hostname, params, input_collection='mongo_hadoop.yield_histo
            readpref="primary",
            input_auth=None,
            output_auth=None, 
-           inputpath='/tmp/in',
-           outputpath='/tmp/out',
+           inputpath='file://' + os.path.join(TEMPDIR, 'in'),
+           outputpath='file://' + os.path.join(TEMPDIR, 'out'),
            inputformat='com.mongodb.hadoop.mapred.MongoInputFormat',
            outputformat='com.mongodb.hadoop.mapred.MongoOutputFormat'):
 
     cmd = [os.path.join(HADOOP_HOME, "bin", "hadoop")]
+    print cmd
     if HADOOP_RELEASE.startswith('cdh3'):
         #Special case for cdh3, as it uses non-default location.
         cmd += ['jar','$HADOOP_HOME/contrib/streaming/hadoop-streaming*']
@@ -243,7 +249,9 @@ def runstreamingjob(hostname, params, input_collection='mongo_hadoop.yield_histo
 class Standalone(unittest.TestCase):
     @classmethod
     def setUpClass(self):
-        self.server = mongo_manager.StandaloneManager(home=os.path.join(TEMPDIR,"standalone1"))
+        global num_runs
+        self.homedir = "standalone1_" + str(num_runs)
+        self.server = mongo_manager.StandaloneManager(home=os.path.join(TEMPDIR,self.homedir))
         self.server_hostname = self.server.start_server(fresh=True)
         self.server.connection().drop_database('mongo_hadoop')
         self.server.connection()['mongo_hadoop'].set_profiling_level(2)
@@ -251,21 +259,25 @@ class Standalone(unittest.TestCase):
                                    "mongo_hadoop",
                                    "yield_historical.in",
                                    JSONFILE_PATH)
+        num_runs += 1
         print "server is ready."
 
     def setUp(self):
         self.server.connection()['mongo_hadoop']['yield_historical.out'].drop()
 
     def tearDown(self):
+        print "Standalone Teardown"
+        logging.info("Standalone Teardown")
         pass
 
 
     @classmethod
     def tearDownClass(self):
-        print "standalone clas: killing mongod"
+        print "Standalone Teardown: killing mongod"
+        logging.info("Standalone Teardown: killing mongod")
         self.server.kill_all_members()
-        shutil.rmtree(os.path.join(TEMPDIR,"standalone1"))
-        time.sleep(7.5)
+        shutil.rmtree(os.path.join(TEMPDIR,self.homedir))
+        time.sleep(10)
 
 class TestBasic(Standalone):
 
@@ -283,6 +295,7 @@ class TestBSONOutput(Standalone):
         PARAMETERS = DEFAULT_PARAMETERS.copy()
         PARAMETERS["mongo.job.output.format"] = "com.mongodb.hadoop.BSONFileOutputFormat"
         PARAMETERS["mapred.output.file"] = os.path.join("file://" + self.temp_outdir, "mongo_hadoop","results.bson")
+        print self.temp_outdir
 
         runjob(self.server_hostname, PARAMETERS)
         mongo_manager.mongo_restore(self.server_hostname, "mongo_hadoop", "yield_historical.out", os.path.join(self.temp_outdir, "mongo_hadoop","results.bson"))
@@ -293,23 +306,26 @@ class BaseShardedTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(self):
-        self.shard1 = mongo_manager.ReplicaSetManager(home=os.path.join(TEMPDIR, "rs0"),
+        time.sleep(5)
+        global num_runs
+
+        self.shard1 = mongo_manager.ReplicaSetManager(home=os.path.join(TEMPDIR, "rs0_" + str(num_runs)),
                 with_arbiter=True,
                 num_members=3)
         self.shard1.start_set(fresh=True)
-        self.shard2 = mongo_manager.ReplicaSetManager(home=os.path.join(TEMPDIR, "rs1"),
+        self.shard2 = mongo_manager.ReplicaSetManager(home=os.path.join(TEMPDIR, "rs1_" + str(num_runs)),
                 with_arbiter=True,
                 num_members=3)
         self.shard2.start_set(fresh=True)
-        self.configdb = mongo_manager.StandaloneManager(home=os.path.join(TEMPDIR, 'config_db'))
+        self.configdb = mongo_manager.StandaloneManager(home=os.path.join(TEMPDIR, 'config_db_' + str(num_runs)))
         self.confighost = self.configdb.start_server(fresh=True)
 
-        self.mongos = mongo_manager.MongosManager(home=os.path.join(TEMPDIR, 'mongos'))
+        self.mongos = mongo_manager.MongosManager(home=os.path.join(TEMPDIR, 'mongos_' + str(num_runs)))
         self.mongos_hostname = self.mongos.start_mongos(self.confighost,
                 [h.get_shard_string() for h in (self.shard1,self.shard2)],
                 noauth=False, fresh=True, addShards=True)
 
-        self.mongos2 = mongo_manager.MongosManager(home=os.path.join(TEMPDIR, 'mongos2'))
+        self.mongos2 = mongo_manager.MongosManager(home=os.path.join(TEMPDIR, 'mongos2_' + str(num_runs)))
         self.mongos2_hostname = self.mongos2.start_mongos(self.confighost,
                 [h.get_shard_string() for h in (self.shard1,self.shard2)],
                 noauth=False, fresh=True, addShards=False)
@@ -323,6 +339,8 @@ class BaseShardedTest(unittest.TestCase):
                                    JSONFILE_PATH)
         mongos_admindb = self.mongos_connection['admin']
         mongos_admindb.command("enablesharding", "mongo_hadoop")
+        self.homedirs = [x + str(num_runs) for x in ("rs0_", "rs1_", "config_db_", "mongos_", "mongos2_")]
+        num_runs += 1
 
         #turn off the balancer
         self.mongos_connection['config'].settings.update({ "_id": "balancer" }, { '$set' : { 'stopped': True } }, True );
@@ -352,28 +370,23 @@ class BaseShardedTest(unittest.TestCase):
             except Exception, e:
                 print e
 
-        time.sleep(5)
+        time.sleep(10)
 
     def setUp(self):
         self.mongos_connection['mongo_hadoop']['yield_historical.out'].drop()
 
-    def tearDown(self):
-        pass
-
     @classmethod
     def tearDownClass(self):
-        logging.info("killing sharded servers!")
+        print "BaseShardedTest: killing sharded servers!"
+        logging.info("BaseShardedTest: killing sharded servers!")
         self.mongos.kill_all_members(sig=9)
         self.mongos2.kill_all_members(sig=9)
         self.shard1.kill_all_members(sig=9)
         self.shard2.kill_all_members(sig=9)
         self.configdb.kill_all_members(sig=9)
         if CLEANUP_TMP != 'false':
-            shutil.rmtree(os.path.join(TEMPDIR,"mongos"))
-            shutil.rmtree(os.path.join(TEMPDIR,"mongos2"))
-            shutil.rmtree(os.path.join(TEMPDIR,"config_db"))
-            shutil.rmtree(os.path.join(TEMPDIR,"rs0"))
-            shutil.rmtree(os.path.join(TEMPDIR,"rs1"))
+            for dirname in self.homedirs:
+                shutil.rmtree(os.path.join(TEMPDIR,dirname))
 
         time.sleep(7.5)
 
@@ -490,7 +503,6 @@ class TestStreaming(Standalone):
 
 class TestS3BSON(Standalone):
 
-
     @unittest.skipIf(not AWS_ACCESSKEY or not AWS_SECRET, 'AWS credentials not provided')
     def test_treasury(self):
         logging.info("Testing static bson on S3 filesystem")
@@ -516,7 +528,10 @@ class TestStaticBSON(Standalone):
         
 
     def tearDown(self):
+        logging.info("TestStaticBSON teardown")
+        print "TestStaticBSON teardown"
         super(TestStaticBSON, self).tearDown();
+        print "removing static bson test dir"
         shutil.rmtree(self.temp_outdir)
 
 
@@ -534,6 +549,25 @@ class TestStaticBSON(Standalone):
         out_col = self.server.connection()['mongo_hadoop']['yield_historical.out']
         self.assertTrue(compare_results(out_col))
 
+    @unittest.skipIf(HADOOP_RELEASE.startswith('1.0') or HADOOP_RELEASE.startswith('0.20'),
+                     'streaming not supported')
+    def test_streaming_staticout(self):
+        logging.info("testing bson output from streaming job")
+        PARAMETERS = DEFAULT_PARAMETERS.copy()
+        PARAMETERS["bson.split.read_splits"] = 'false'
+        PARAMETERS["bson.output.build_splits"] = 'false'
+        PARAMETERS["mapred.max.split.size"] = '100000'
+
+        PARAMETERS["mapred.output.file"]= "file://" + os.path.join(TEMPDIR,'BLAH.bson')
+        inputpath = os.path.join("file://" + self.temp_outdir, "mongo_hadoop","yield_historical.in.bson")
+        runstreamingjob(self.server_hostname,
+                        inputformat="com.mongodb.hadoop.mapred.BSONFileInputFormat",
+                        outputformat="com.mongodb.hadoop.mapred.BSONFileOutputFormat",
+                        inputpath=inputpath,
+                        params=PARAMETERS)
+        #out_col = self.server.connection()['mongo_hadoop']['yield_historical.out']
+        #self.assertTrue(compare_results(out_col))
+
     @unittest.skipIf(not AWS_ACCESSKEY or not AWS_SECRET, 'AWS credentials not provided')
     @unittest.skipIf(HADOOP_RELEASE.startswith('1.0') or HADOOP_RELEASE.startswith('0.20'),
                      'streaming not supported')
@@ -550,6 +584,29 @@ class TestStaticBSON(Standalone):
                         params=PARAMETERS)
         out_col = self.server.connection()['mongo_hadoop']['yield_historical.out']
         self.assertTrue(compare_results(out_col))
+
+
+    def test_treasury_directory(self):
+        logging.info("Testing bsoninput from directory path")
+        PARAMETERS = DEFAULT_PARAMETERS.copy()
+        PARAMETERS["mongo.job.input.format"] = "com.mongodb.hadoop.BSONFileInputFormat"
+        PARAMETERS["mapred.max.split.size"] = '200000'
+        PARAMETERS["bson.pathfilter.class"] = 'com.mongodb.hadoop.BSONPathFilter'
+        logging.info(PARAMETERS)
+        runbsonjob(os.path.join("file://" + self.temp_outdir, "mongo_hadoop"), PARAMETERS, self.server_hostname)
+        out_col = self.server.connection()['mongo_hadoop']['yield_historical.out']
+        self.assertTrue(compare_results(out_col))
+
+    def test_treasury_onesplit(self):
+        logging.info("Testing bsoninput with one split")
+        PARAMETERS = DEFAULT_PARAMETERS.copy()
+        PARAMETERS["mongo.job.input.format"] = "com.mongodb.hadoop.BSONFileInputFormat"
+        PARAMETERS["bson.split.read_splits"] = 'false'
+        logging.info(PARAMETERS)
+        runbsonjob(os.path.join("file://" + self.temp_outdir, "mongo_hadoop","yield_historical.in.bson"), PARAMETERS, self.server_hostname)
+        out_col = self.server.connection()['mongo_hadoop']['yield_historical.out']
+        self.assertTrue(compare_results(out_col))
+        #runjob(self.server_hostname, DEFAULT_PARAMETERS)
 
 
     def test_treasury(self):
@@ -664,6 +721,7 @@ class TestUpdateWritable(Standalone):
             logging.info("verifying update for", r.get("_id", None))
             self.assertEqual(len(r.get('calculatedAt', [])), 2)
             self.assertEqual(r.get('numCalculations', 0), 2)
+
 class TestOldMRApi(Standalone):
 
     def test_treasury(self):
